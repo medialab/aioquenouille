@@ -26,9 +26,11 @@ async def sleeper_constant(item):
     await asyncio.sleep(0.0001)
     return item
 
+
 async def sleeper_raise(item):
     await asyncio.sleep(0.0001)
     raise RuntimeError
+
 
 def not_async(item):
     return item * 2
@@ -79,6 +81,12 @@ class TestIteratorToAsyncGenerator(object):
 
         with pytest.raises(TypeError):
             iterator_to_async_generator(DATA_TEST, sleeper, buffer_size=0)
+
+        with pytest.raises(TypeError):
+            iterator_to_async_generator(DATA_TEST, sleeper, throttle='test')
+
+        with pytest.raises(TypeError):
+            iterator_to_async_generator(DATA_TEST, sleeper, throttle=-4)
 
     @pytest.mark.asyncio
     async def test_basics(self):
@@ -166,6 +174,11 @@ class TestIteratorToAsyncGenerator(object):
         assert set(results) == set(DATA_TEST)
         assert int(total_slept_for * 10) == TIME_TEST[7]
 
+    # @pytest.mark.asyncio
+    # async def test_func_raise(self):
+    #     with pytest.raises(RuntimeError):
+    #         result = [el async for el in iterator_to_async_generator(DATA_TEST, sleeper_raise, max_workers=4, key=identity)]
+
     @pytest.mark.asyncio
     async def test_callable_parallelism(self):
         def per_group(g):
@@ -221,3 +234,60 @@ class TestIteratorToAsyncGenerator(object):
 
         # with pytest.raises(TypeError):
         #     result = [el async for el in iterator_to_async_generator(DATA_TEST_2, sleeper_constant, max_workers=4, parallelism=per_group_negative, key=identity)]
+
+    @pytest.mark.asyncio
+    async def test_throttle(self):
+
+        def group(x):
+            return 'SAME'
+
+        nbs = set([el async for el in iterator_to_async_generator(range(10), sleeper_constant, 10, key=group, throttle=0.01)])
+        assert nbs == set(range(10))
+
+        nbs = set([el async for el in iterator_to_async_generator(range(10), sleeper_constant, 10, key=group, throttle=0.01, buffer_size=1)])
+        assert nbs == set(range(10))
+
+        nbs = set([el async for el in iterator_to_async_generator(range(10), sleeper_constant, 10, key=group, throttle=0.01, buffer_size=3)])
+        assert nbs == set(range(10))
+
+        results = list([el async for el in iterator_to_async_generator(DATA_TEST, sleeper, 4, key=identity, throttle=0.01)])
+        assert set(results) == set(DATA_TEST)
+
+    @pytest.mark.asyncio
+    async def test_callable_throttle(self):
+
+        def throttling(group, nb, result):
+            assert nb == result
+
+            if group == 'odd':
+                return 0
+
+            return 0.1
+
+        def group(x):
+            return 'even' if x % 2 == 0 else 'odd'
+
+        nbs = set([el async for el in iterator_to_async_generator(range(10), sleeper_constant, 10, key=group, throttle=throttling)])
+
+        assert nbs == set(range(10))
+
+        # def hellraiser(g, i, result):
+        #     if i > 2:
+        #         raise TypeError
+
+        #     return 0.01
+
+        # with pytest.raises(TypeError):
+        #     list(imap_unordered(range(5), identity, 4, key=group, throttle=hellraiser))
+
+        # def wrong_type(g, i, result):
+        #     return 'test'
+
+        # with pytest.raises(TypeError):
+        #     list(imap_unordered(range(5), identity, 2, key=group, throttle=wrong_type))
+
+        # def negative(g, i, result):
+        #     return -30
+
+        # with pytest.raises(TypeError):
+        #     list(imap_unordered(range(5), identity, 2, key=group, throttle=negative))

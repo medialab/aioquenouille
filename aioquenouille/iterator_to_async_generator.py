@@ -8,12 +8,20 @@
 # Exceptions doesn't seem to be propagated
 #
 
+import time
+import heapq
 import asyncio
 from itertools import count
 from collections import OrderedDict
 from collections.abc import Iterable
 
-from aioquenouille.constants import THE_END, DEFAULT_BUFFER_SIZE, DEFAULT_MAX_WORKERS, DEFAULT_PARALLELISM
+from aioquenouille.constants import (
+    THE_END,
+    DEFAULT_BUFFER_SIZE,
+    DEFAULT_MAX_WORKERS,
+    DEFAULT_PARALLELISM,
+    DEFAULT_THROTTLE
+)
 
 
 class Job(object):
@@ -30,18 +38,55 @@ class Job(object):
         self.result = None
 
 
+class ThrottledGroup(object):
+    __slots__ = ("throttle", "groups", "groups_heap")
+
+    def __init__(self, throttle):
+        self.throttle = throttle
+        self.groups = set()
+        self.groups_heap = []
+
+    def add(self, job: Job):
+
+        throttle_time = self.throttle
+
+        if callable(self.throttle):
+            throttle_time = self.throttle(
+                job.group,
+                job.item,
+                job.result
+            )
+
+            if throttle_time is None:
+                throttle_time = 0
+
+            if not isinstance(throttle_time, (int, float)) or throttle_time < 0:
+                raise TypeError("callable 'throttle' must return numbers >= 0")
+
+        if throttle_time != 0:
+
+            self.groups.add(job.group)
+            heapq.heappush(self.groups_heap, (time.time() + throttle_time, job.group))
+
+    def cleanup(self):
+        while self.groups_heap and self.groups_heap[0][0] < time.time():
+            self.groups.remove(self.groups_heap[0][1])
+            heapq.heappop(self.groups_heap)
+
+
 class Buffer(object):
     """
     Class representing the buffer.
     """
 
-    __slots__ = ("items", "maxsize", "parallelism", "worked_groups")
+    __slots__ = ("items", "maxsize", "parallelism", "worked_groups", "throttle")
 
-    def __init__(self, maxsize, parallelism):
+    def __init__(self, maxsize, parallelism, throttle):
         self.maxsize = maxsize
         self.items = OrderedDict()
         self.parallelism = parallelism
         self.worked_groups = {}
+        self.throttle = throttle
 
     def __full(self):
         count = len(self.items)
@@ -57,6 +102,9 @@ class Buffer(object):
 
         if job.group is None:
             return True
+
+        if job.group in self.throttle.groups:
+            return False
 
         count = self.worked_groups.get(job.group, 0)
 
@@ -84,6 +132,9 @@ class Buffer(object):
         self.items[id(job)] = job
 
     def get(self):
+
+        self.throttle.cleanup()
+
         if len(self.items) == 0:
             return None
 
@@ -118,8 +169,10 @@ class Buffer(object):
         else:
             self.worked_groups[group] -= 1
 
+        self.throttle.add(job)
 
-def validate_queue_kwargs(iterable, func, max_workers, key, parallelism, buffer_size):
+
+def validate_queue_kwargs(iterable, func, max_workers, key, parallelism, buffer_size, throttle):
 
     if not isinstance(iterable, Iterable):
         raise TypeError("target is not iterable")
@@ -145,6 +198,12 @@ def validate_queue_kwargs(iterable, func, max_workers, key, parallelism, buffer_
     if not isinstance(buffer_size, int) or buffer_size < 1:
         raise TypeError("'buffer_size' is not an integer > 0")
 
+    if not isinstance(throttle, (int, float)) and not callable(throttle):
+        raise TypeError('"throttle" is not a number nor callable')
+
+    if isinstance(throttle, (int, float)) and throttle < 0:
+        raise TypeError('"throttle" cannot be negative')
+
 
 async def worker(job_queue, output_queue, func, event_queue_full):
     while True:
@@ -166,6 +225,11 @@ async def iterable_to_queue(iterable, job_queue, output_queue, job_counter, buff
             except StopIteration:
 
                 if not buffer.empty():
+
+                    if job_queue.empty() and output_queue.empty():
+                        await job_queue.join()
+                        continue
+
                     await event_queue_full.wait()
                     event_queue_full.clear()
                     continue
@@ -189,8 +253,13 @@ async def iterable_to_queue(iterable, job_queue, output_queue, job_counter, buff
                 job_to_process = buffer.get()
 
                 while job_to_process is None:
-                    await event_queue_full.wait()
-                    event_queue_full.clear()
+
+                    if job_queue.empty() and output_queue.empty():
+                        await job_queue.join()
+                    else:
+                        await event_queue_full.wait()
+                        event_queue_full.clear()
+
                     job_to_process = buffer.get()
 
                 buffer.register_job(job_to_process)
@@ -218,13 +287,13 @@ async def generate_from_output_queue(output_queue, buffer):
         del job
 
 
-def iterator_to_async_generator(iterable, func, max_workers=DEFAULT_MAX_WORKERS, key=None, parallelism=DEFAULT_PARALLELISM, buffer_size=DEFAULT_BUFFER_SIZE):
+def iterator_to_async_generator(iterable, func, max_workers=DEFAULT_MAX_WORKERS, key=None, parallelism=DEFAULT_PARALLELISM, buffer_size=DEFAULT_BUFFER_SIZE, throttle=DEFAULT_THROTTLE):
 
-    validate_queue_kwargs(iterable=iterable, func=func, max_workers=max_workers, key=key, parallelism=parallelism, buffer_size=buffer_size)
+    validate_queue_kwargs(iterable=iterable, func=func, max_workers=max_workers, key=key, parallelism=parallelism, buffer_size=buffer_size, throttle=throttle)
 
     nb_workers = min(max_workers, len(iterable))
     iterable = iter(iterable)
-    buffer = Buffer(buffer_size, parallelism)
+    buffer = Buffer(buffer_size, parallelism, ThrottledGroup(throttle))
     job_queue = asyncio.Queue(maxsize=max_workers)
 
     async def get_generator():
