@@ -4,9 +4,6 @@
 #
 # Python implementation of a complex, lazy async iterable consumer.
 #
-# Job.index is not used yet
-# Exceptions doesn't seem to be propagated
-#
 
 import time
 import heapq
@@ -22,6 +19,7 @@ from aioquenouille.constants import (
     DEFAULT_PARALLELISM,
     DEFAULT_THROTTLE
 )
+from aioquenouille.utils import clear, smash
 
 
 class Job(object):
@@ -205,18 +203,35 @@ def validate_queue_kwargs(iterable, func, max_workers, key, parallelism, buffer_
         raise TypeError('"throttle" cannot be negative')
 
 
-async def worker(job_queue, output_queue, func, event_queue_full):
+async def worker(func, job_queue, output_queue, event_job_queue_full, error):
     while True:
         job = await job_queue.get()
-        job.result = await func(job.item)
-        output_queue.put_nowait(job)
-        job_queue.task_done()
-        event_queue_full.set()
+
+        try:
+            job.result = await func(job.item)
+            output_queue.put_nowait(job)
+            event_job_queue_full.set()
+            job_queue.task_done()
+
+        except BaseException as e:
+            error.append(e)
+            event_job_queue_full.set()
+            job_queue.task_done()
+            clear(job_queue)
+            raise e
 
 
-async def iterable_to_queue(iterable, job_queue, output_queue, job_counter, buffer, event_queue_full, key=None):
+async def iterable_to_queue(iterable, buffer, job_counter, job_queue, output_queue, event_job_queue_full, error, key=None):
     while True:
-        job = buffer.get()
+        try:
+            job = buffer.get()
+
+        except BaseException:
+            clear(job_queue)
+            smash(output_queue, THE_END)
+            await output_queue.join()
+
+            raise
 
         if job is None:
             try:
@@ -230,9 +245,16 @@ async def iterable_to_queue(iterable, job_queue, output_queue, job_counter, buff
                         await job_queue.join()
                         continue
 
-                    await event_queue_full.wait()
-                    event_queue_full.clear()
-                    continue
+                    await event_job_queue_full.wait()
+                    event_job_queue_full.clear()
+
+                    if not error:
+                        continue
+
+                    smash(output_queue, THE_END)
+                    await output_queue.join()
+
+                    raise error[0]
 
                 await job_queue.join()
                 output_queue.put_nowait(THE_END)
@@ -242,13 +264,22 @@ async def iterable_to_queue(iterable, job_queue, output_queue, job_counter, buff
             group = None
 
             if key is not None:
-                group = key(item)
+
+                try:
+                    group = key(item)
+
+                except BaseException:
+                    clear(job_queue)
+                    smash(output_queue, THE_END)
+                    await output_queue.join()
+                    raise
 
             job = Job(item=item, index=next(job_counter), group=group)
 
             try:
                 buffer.put(job)
                 continue
+
             except AssertionError:
                 job_to_process = buffer.get()
 
@@ -256,20 +287,43 @@ async def iterable_to_queue(iterable, job_queue, output_queue, job_counter, buff
 
                     if job_queue.empty() and output_queue.empty():
                         await job_queue.join()
+
                     else:
-                        await event_queue_full.wait()
-                        event_queue_full.clear()
+                        await event_job_queue_full.wait()
+                        event_job_queue_full.clear()
+
+                        if error:
+                            smash(output_queue, THE_END)
+                            await output_queue.join()
+
+                            raise error[0]
 
                     job_to_process = buffer.get()
 
                 buffer.register_job(job_to_process)
+
                 await job_queue.put(job_to_process)
+
+                if error:
+                    clear(job_queue)
+                    smash(output_queue, THE_END)
+                    await output_queue.join()
+
+                    raise error[0]
 
                 buffer.put(job)
                 continue
 
         buffer.register_job(job)
+
         await job_queue.put(job)
+
+        if error:
+            clear(job_queue)
+            smash(output_queue, THE_END)
+            await output_queue.join()
+
+            raise error[0]
 
 
 async def generate_from_output_queue(output_queue, buffer):
@@ -298,16 +352,17 @@ def iterator_to_async_generator(iterable, func, max_workers=DEFAULT_MAX_WORKERS,
 
     async def get_generator():
         job_counter = count()
-        event_queue_full = asyncio.Event()
+        event_job_queue_full = asyncio.Event()
+        error = []
         output_queue = asyncio.Queue()
 
         tasks = []
 
         for i in range(nb_workers):
-            task = asyncio.create_task(worker(job_queue, output_queue, func, event_queue_full))
+            task = asyncio.create_task(worker(func, job_queue, output_queue, event_job_queue_full, error))
             tasks.append(task)
 
-        task_job_queue = asyncio.create_task(iterable_to_queue(iterable, job_queue, output_queue, job_counter, buffer, event_queue_full, key))
+        task_job_queue = asyncio.create_task(iterable_to_queue(iterable, buffer, job_counter, job_queue, output_queue, event_job_queue_full, error, key))
         tasks.append(task_job_queue)
 
         async for i in generate_from_output_queue(output_queue, buffer):
@@ -317,6 +372,7 @@ def iterator_to_async_generator(iterable, func, max_workers=DEFAULT_MAX_WORKERS,
 
         for task in tasks:
             task.cancel()
+
         await asyncio.gather(*tasks, return_exceptions=True)
 
     return get_generator()
