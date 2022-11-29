@@ -341,7 +341,7 @@ async def generate_from_output_queue(output_queue, buffer):
         del job
 
 
-def iterator_to_async_generator(iterable, func, max_workers=DEFAULT_MAX_WORKERS, key=None, parallelism=DEFAULT_PARALLELISM, buffer_size=DEFAULT_BUFFER_SIZE, throttle=DEFAULT_THROTTLE):
+def imap(iterable, func, max_workers=DEFAULT_MAX_WORKERS, key=None, parallelism=DEFAULT_PARALLELISM, buffer_size=DEFAULT_BUFFER_SIZE, throttle=DEFAULT_THROTTLE):
 
     validate_queue_kwargs(iterable=iterable, func=func, max_workers=max_workers, key=key, parallelism=parallelism, buffer_size=buffer_size, throttle=throttle)
 

@@ -1,1 +1,1 @@
-from aioquenouille.iterator_to_async_generator import iterator_to_async_generator
+from aioquenouille.imap import imap
