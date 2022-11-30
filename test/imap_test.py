@@ -25,6 +25,11 @@ async def sleeper_constant(item):
     return item
 
 
+async def enumerated_sleeper(item):
+    await asyncio.sleep(item[0] / 10)
+    return item[0]
+
+
 def not_async(item):
     return item * 2
 
@@ -53,6 +58,9 @@ class TestImap(object):
 
         with pytest.raises(TypeError):
             imap(DATA_TEST, not_async)
+
+        with pytest.raises(TypeError):
+            imap(DATA_TEST, sleeper, ordered="test")
 
         with pytest.raises(TypeError):
             imap(DATA_TEST, sleeper, max_workers="test")
@@ -108,8 +116,7 @@ class TestImap(object):
 
         results = [el async for el in imap(DATA_TEST, sleeper, max_workers=1)]
 
-        assert len(results) == len(DATA_TEST)
-        assert set(results) == set(DATA_TEST)
+        assert results == DATA_TEST
 
     @pytest.mark.asyncio
     async def test_one_item(self):
@@ -125,8 +132,16 @@ class TestImap(object):
         assert results == []
 
     @pytest.mark.asyncio
+    async def test_ordered(self):
+
+        results = [el async for el in imap(DATA_TEST, sleeper, 2, ordered=True)]
+
+        assert results == DATA_TEST
+
+    @pytest.mark.asyncio
     async def test_group_parallelism(self):
 
+        # Unordered
         results = [el async for el in imap(DATA_TEST, sleeper, max_workers=2, parallelism=1, key=making_groups)]
 
         assert set(results) == set(DATA_TEST)
@@ -141,6 +156,35 @@ class TestImap(object):
 
         results = [el async for el in imap(DATA_TEST, sleeper, max_workers=2, parallelism=3, key=making_groups, buffer_size=3)]
 
+        assert set(results) == set(DATA_TEST)
+
+        # Ordered
+        results = [el async for el in imap(DATA_TEST, sleeper, max_workers=2, ordered=True, parallelism=1, key=making_groups)]
+
+        assert results == DATA_TEST
+
+        results = [el async for el in imap(DATA_TEST, sleeper, max_workers=2, ordered=True, parallelism=1, key=making_groups, buffer_size=3)]
+
+        assert results == DATA_TEST
+
+        results = [el async for el in imap(DATA_TEST, sleeper, max_workers=2, ordered=True, parallelism=1, key=making_groups, buffer_size=1)]
+
+        assert results == DATA_TEST
+
+        results = [el async for el in imap(DATA_TEST, sleeper, max_workers=2, ordered=True, parallelism=3, key=making_groups, buffer_size=3)]
+
+        assert results == DATA_TEST
+
+    @pytest.mark.asyncio
+    async def test_break(self):
+
+        async for i in imap(enumerate(DATA_TEST), enumerated_sleeper, 5, ordered=True):
+            if i == 2:
+                break
+
+        results = [el async for el in imap(DATA_TEST, sleeper, 2)]
+
+        assert len(results) == len(DATA_TEST)
         assert set(results) == set(DATA_TEST)
 
     @pytest.mark.asyncio
@@ -214,8 +258,20 @@ class TestImap(object):
         nbs = set([el async for el in imap(range(10), sleeper_constant, 10, key=group, throttle=0.01, buffer_size=3)])
         assert nbs == set(range(10))
 
-        results = list([el async for el in imap(DATA_TEST, sleeper, 4, key=identity, throttle=0.01)])
+        results = [el async for el in imap(DATA_TEST, sleeper, 4, key=identity, throttle=0.01)]
         assert set(results) == set(DATA_TEST)
+
+        nbs = [el async for el in imap(range(10), sleeper_constant, 10, ordered=True, key=group, throttle=0.01)]
+        assert nbs == list(range(10))
+
+        nbs = [el async for el in imap(range(10), sleeper_constant, 10, ordered=True, key=group, throttle=0.01, buffer_size=1)]
+        assert nbs == list(range(10))
+
+        nbs = [el async for el in imap(range(10), sleeper_constant, 10, ordered=True, key=group, throttle=0.01, buffer_size=3)]
+        assert nbs == list(range(10))
+
+        results = [el async for el in imap(DATA_TEST, sleeper, 4, ordered=True, key=identity, throttle=0.01)]
+        assert results == DATA_TEST
 
     @pytest.mark.asyncio
     async def test_callable_throttle(self):

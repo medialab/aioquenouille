@@ -9,8 +9,8 @@ import time
 import heapq
 import asyncio
 from itertools import count
+from collections.abc import Iterable, Sized
 from collections import OrderedDict
-from collections.abc import Iterable
 
 from aioquenouille.constants import (
     THE_END,
@@ -169,7 +169,33 @@ class Buffer(object):
         self.throttle.add(job)
 
 
-def validate_queue_kwargs(iterable, func, max_workers, key, parallelism, buffer_size, throttle):
+class OrderedOutputBuffer(object):
+    """
+    Class in charge of yielding values in the same order as they were extracted
+    from the iterated stream.
+    Note that this requires to buffer values into memory until the next valid
+    item has been processed by a worker thread.
+    """
+
+    def __init__(self):
+        self.last_index = 0
+        self.items = {}
+
+    def flush(self):
+        while self.last_index in self.items:
+            yield self.items.pop(self.last_index).result
+            self.last_index += 1
+
+    def output(self, job):
+        if job.index == self.last_index:
+            self.last_index += 1
+            yield job.result
+            yield from self.flush()
+        else:
+            self.items[job.index] = job
+
+
+def validate_queue_kwargs(iterable, func, max_workers, ordered, key, parallelism, buffer_size, throttle):
 
     if not isinstance(iterable, Iterable):
         raise TypeError("target is not iterable")
@@ -177,8 +203,11 @@ def validate_queue_kwargs(iterable, func, max_workers, key, parallelism, buffer_
     if not callable(func):
         raise TypeError('worker function is not callable')
 
+    if not isinstance(ordered, bool):
+        raise TypeError("'ordered' is not a boolean")
+
     if not asyncio.iscoroutinefunction(func):
-        raise TypeError("worker function is not async")
+        raise TypeError("'func' is not async")
 
     if not isinstance(max_workers, int) or max_workers < 1:
         raise TypeError("'max_workers' is not an integer > 0")
@@ -196,20 +225,20 @@ def validate_queue_kwargs(iterable, func, max_workers, key, parallelism, buffer_
         raise TypeError("'buffer_size' is not an integer > 0")
 
     if not isinstance(throttle, (int, float)) and not callable(throttle):
-        raise TypeError('"throttle" is not a number nor callable')
+        raise TypeError("'throttle' is not a number nor callable")
 
     if isinstance(throttle, (int, float)) and throttle < 0:
-        raise TypeError('"throttle" cannot be negative')
+        raise TypeError("'throttle' cannot be negative")
 
 
-async def worker(func, job_queue, output_queue, event_job_queue_full):
+async def worker(func, job_queue, output_queue, event_job_queue_blocks_buffer):
     try:
 
         while True:
             job = await job_queue.get()
             job.result = await func(job.item)
             output_queue.put_nowait(job)
-            event_job_queue_full.set()
+            event_job_queue_blocks_buffer.set()
             job_queue.task_done()
 
     except BaseException as e:
@@ -218,7 +247,7 @@ async def worker(func, job_queue, output_queue, event_job_queue_full):
         smash(output_queue, e)
 
 
-async def iterable_to_queue(iterable, buffer, job_counter, job_queue, output_queue, event_job_queue_full, key=None):
+async def iterable_to_queue(iterable, buffer, job_counter, job_queue, output_queue, event_job_queue_blocks_buffer, key=None):
     while True:
         try:
             job = buffer.get()
@@ -241,8 +270,8 @@ async def iterable_to_queue(iterable, buffer, job_counter, job_queue, output_que
                         await job_queue.join()
                         continue
 
-                    await event_job_queue_full.wait()
-                    event_job_queue_full.clear()
+                    await event_job_queue_blocks_buffer.wait()
+                    event_job_queue_blocks_buffer.clear()
 
                     continue
 
@@ -278,8 +307,8 @@ async def iterable_to_queue(iterable, buffer, job_counter, job_queue, output_que
                     await job_queue.join()
 
                 else:
-                    await event_job_queue_full.wait()
-                    event_job_queue_full.clear()
+                    await event_job_queue_blocks_buffer.wait()
+                    event_job_queue_blocks_buffer.clear()
 
                 job_to_process = buffer.get()
 
@@ -295,7 +324,7 @@ async def iterable_to_queue(iterable, buffer, job_counter, job_queue, output_que
         await job_queue.put(job)
 
 
-async def generate_from_output_queue(output_queue, buffer):
+async def generate_from_output_queue(output_queue, buffer, ordered_output_buffer=None):
     while True:
         job = await output_queue.get()
         output_queue.task_done()
@@ -308,32 +337,39 @@ async def generate_from_output_queue(output_queue, buffer):
 
         buffer.unregister_job(job)
 
-        yield job.result
+        if isinstance(ordered_output_buffer, OrderedOutputBuffer):
+            for result in ordered_output_buffer.output(job):
+                yield result
+        else:
+            yield job.result
 
         del job
 
 
-def imap(iterable, func, max_workers=DEFAULT_MAX_WORKERS, key=None, parallelism=DEFAULT_PARALLELISM, buffer_size=DEFAULT_BUFFER_SIZE, throttle=DEFAULT_THROTTLE):
+def imap(iterable, func, max_workers=DEFAULT_MAX_WORKERS, ordered=False, key=None, parallelism=DEFAULT_PARALLELISM, buffer_size=DEFAULT_BUFFER_SIZE, throttle=DEFAULT_THROTTLE):
 
-    validate_queue_kwargs(iterable=iterable, func=func, max_workers=max_workers, key=key, parallelism=parallelism, buffer_size=buffer_size, throttle=throttle)
+    validate_queue_kwargs(iterable=iterable, func=func, ordered=ordered, max_workers=max_workers, key=key, parallelism=parallelism, buffer_size=buffer_size, throttle=throttle)
 
-    nb_workers = min(max_workers, len(iterable))
+    if isinstance(iterable, Sized):
+        max_workers = min(max_workers, len(iterable))
+
     iterable = iter(iterable)
     buffer = Buffer(buffer_size, parallelism, ThrottledGroup(throttle))
     job_queue = asyncio.Queue(maxsize=max_workers)
 
     async def get_generator():
         job_counter = count()
-        event_job_queue_full = asyncio.Event()
+        event_job_queue_blocks_buffer = asyncio.Event()
         output_queue = asyncio.Queue()
+        ordered_output_buffer = OrderedOutputBuffer()
 
         tasks = []
 
-        for i in range(nb_workers):
-            task = asyncio.create_task(worker(func, job_queue, output_queue, event_job_queue_full))
+        for i in range(max_workers):
+            task = asyncio.create_task(worker(func, job_queue, output_queue, event_job_queue_blocks_buffer))
             tasks.append(task)
 
-        task_job_queue = asyncio.create_task(iterable_to_queue(iterable, buffer, job_counter, job_queue, output_queue, event_job_queue_full, key))
+        task_job_queue = asyncio.create_task(iterable_to_queue(iterable, buffer, job_counter, job_queue, output_queue, event_job_queue_blocks_buffer, key))
         tasks.append(task_job_queue)
 
         async def cleanup(failed=False):
@@ -346,8 +382,12 @@ def imap(iterable, func, max_workers=DEFAULT_MAX_WORKERS, key=None, parallelism=
             await asyncio.gather(*tasks, return_exceptions=True)
 
         try:
-            async for i in generate_from_output_queue(output_queue, buffer):
-                yield i
+            if ordered:
+                async for i in generate_from_output_queue(output_queue, buffer, ordered_output_buffer):
+                    yield i
+            else:
+                async for i in generate_from_output_queue(output_queue, buffer):
+                    yield i
         except BaseException as e:
             await cleanup(failed=True)
             raise e
