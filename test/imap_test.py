@@ -1,8 +1,7 @@
 # =============================================================================
-# Quenouille imap Unit Tests
+# Aioquenouille imap Unit Tests
 # =============================================================================
 #
-# We have some warning during the tests
 
 import pytest
 import asyncio
@@ -339,3 +338,12 @@ class TestImap(object):
 
         with pytest.raises(RuntimeError):
             [el async for el in imap(range(5), sleeper_constant, 2, key=group)]
+
+    @pytest.mark.asyncio
+    async def test_worker_returns_exception(self):
+        async def return_exc(item):
+            await asyncio.sleep(0.0001)
+            return RuntimeError
+
+        result = [el async for el in imap(range(3), return_exc, 2)]
+        assert result == [RuntimeError, RuntimeError, RuntimeError]

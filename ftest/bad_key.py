@@ -1,4 +1,3 @@
-import time
 import asyncio
 from aioquenouille import imap
 
