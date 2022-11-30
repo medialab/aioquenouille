@@ -4,7 +4,6 @@
 #
 # We have some warning during the tests
 
-import time
 import pytest
 import asyncio
 
@@ -12,7 +11,6 @@ from aioquenouille import imap
 
 
 DATA_TEST = [3, 7, 3, 2, 6, 6]
-TIME_TEST = [14, 7, 27, 3, 17, 17, 19, 14]
 
 DATA_TEST_2 = ["A", "A", "B", "B", "B", "B", "B", "C", "D", "D"]
 
@@ -86,13 +84,10 @@ class TestImap(object):
     @pytest.mark.asyncio
     async def test_basics(self):
 
-        started_at = time.monotonic()
         results = [el async for el in imap(DATA_TEST, sleeper, max_workers=2)]
-        total_slept_for = time.monotonic() - started_at
 
         assert len(results) == len(DATA_TEST)
         assert set(results) == set(DATA_TEST)
-        assert int(total_slept_for * 10) == TIME_TEST[0]
 
     @pytest.mark.asyncio
     async def test_none_iterator(self):
@@ -104,33 +99,24 @@ class TestImap(object):
     @pytest.mark.asyncio
     async def test_less_jobs_than_tasks(self):
 
-        started_at = time.monotonic()
         results = [el async for el in imap(DATA_TEST[:2], sleeper, max_workers=2)]
-        total_slept_for = time.monotonic() - started_at
 
         assert set(results) == set([3, 7])
-        assert int(total_slept_for * 10) == TIME_TEST[1]
 
     @pytest.mark.asyncio
     async def test_one_task(self):
 
-        started_at = time.monotonic()
         results = [el async for el in imap(DATA_TEST, sleeper, max_workers=1)]
-        total_slept_for = time.monotonic() - started_at
 
         assert len(results) == len(DATA_TEST)
         assert set(results) == set(DATA_TEST)
-        assert int(total_slept_for * 10) == TIME_TEST[2]
 
     @pytest.mark.asyncio
     async def test_one_item(self):
 
-        started_at = time.monotonic()
         results = [el async for el in imap(DATA_TEST[:1], sleeper, max_workers=2)]
-        total_slept_for = time.monotonic() - started_at
 
         assert results == [3]
-        assert int(total_slept_for * 10) == TIME_TEST[3]
 
     @pytest.mark.asyncio
     async def test_empty(self):
@@ -141,33 +127,21 @@ class TestImap(object):
     @pytest.mark.asyncio
     async def test_group_parallelism(self):
 
-        started_at = time.monotonic()
         results = [el async for el in imap(DATA_TEST, sleeper, max_workers=2, parallelism=1, key=making_groups)]
-        total_slept_for = time.monotonic() - started_at
 
         assert set(results) == set(DATA_TEST)
-        assert int(total_slept_for * 10) == TIME_TEST[4]
 
-        started_at = time.monotonic()
         results = [el async for el in imap(DATA_TEST, sleeper, max_workers=2, parallelism=1, key=making_groups, buffer_size=3)]
-        total_slept_for = time.monotonic() - started_at
 
         assert set(results) == set(DATA_TEST)
-        assert int(total_slept_for * 10) == TIME_TEST[5]
 
-        started_at = time.monotonic()
         results = [el async for el in imap(DATA_TEST, sleeper, max_workers=2, parallelism=1, key=making_groups, buffer_size=1)]
-        total_slept_for = time.monotonic() - started_at
 
         assert set(results) == set(DATA_TEST)
-        assert int(total_slept_for * 10) == TIME_TEST[6]
 
-        started_at = time.monotonic()
         results = [el async for el in imap(DATA_TEST, sleeper, max_workers=2, parallelism=3, key=making_groups, buffer_size=3)]
-        total_slept_for = time.monotonic() - started_at
 
         assert set(results) == set(DATA_TEST)
-        assert int(total_slept_for * 10) == TIME_TEST[7]
 
     @pytest.mark.asyncio
     async def test_callable_parallelism(self):
